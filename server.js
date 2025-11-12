@@ -10,21 +10,25 @@ const cookieParser = require('cookie-parser');
 const session = require('express-session');
 const bodyParser = require('body-parser');
 
-// const nodemailer = require('nodemailer');
-
 const app = express();
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = 'votre_clef_secrete_super_safe';
 
+// Configuration de l'URL de base
+const BASE_URL = process.env.NODE_ENV === 'production' 
+  ? 'https://votre-domaine.com' 
+  : `http://localhost:${PORT}`;
+
 // Middlewares
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static('uploads'));
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000'],
+  origin: ['http://localhost:3001', 'http://localhost:3000','http://localhost:3002'],
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
@@ -36,35 +40,87 @@ app.use(session({
   cookie: { secure: false }
 }));
 
-
 // Configuration de multer pour enregistrer les images dans /uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, "uploads/"); // Dossier où stocker les images
+    cb(null, "uploads/");
   },
   filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname)); // Nom unique
+    cb(null, Date.now() + path.extname(file.originalname));
   },
 });
 
-// Initialiser multer
-const upload = multer({ storage: storage });
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  }
+});
 
-
-// Configuration de la connexion MySQL
+// Configuration de la connexion MySQL (options valides)
 const dbConfig = {
   host: 'localhost',
   user: 'root',
   password: '',
-  database: 'g_empire'
+  database: 'g_empire',
+  connectionLimit: 10,
+  // Options valides pour mysql2
+  acquireTimeout: 60000,
+  timeout: 60000,
+  connectTimeout: 60000,
+  reconnect: true
 };
 
 // Création du pool global unique
 const pool = mysql.createPool(dbConfig);
 console.log('Connexion à la base de données MySQL établie');
 
-// === ROUTES ===
+// Middleware de vérification du token
+function verifyToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader) return res.status(401).json({ message: 'Token manquant' });
 
+  const token = authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'Token manquant' });
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(403).json({ message: 'Token invalide' });
+  }
+}
+
+// Middleware de validation pour le contact
+const validateContact = (req, res, next) => {
+  const { nom, email, objet, message } = req.body;
+  
+  if (!nom || !email || !objet || !message) {
+    return res.status(400).json({
+      success: false,
+      message: 'Tous les champs sont obligatoires'
+    });
+  }
+  
+  if (!/\S+@\S+\.\S+/.test(email)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Format d\'email invalide'
+    });
+  }
+  
+  if (message.length > 2000) {
+    return res.status(400).json({
+      success: false,
+      message: 'Le message ne peut pas dépasser 2000 caractères'
+    });
+  }
+  
+  next();
+};
+
+// === ROUTES AUTHENTIFICATION ===
 
 // Enregistrement
 app.post('/api/register', async (req, res) => {
@@ -85,8 +141,7 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-
-//connexion
+// Connexion
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
 
@@ -115,7 +170,6 @@ app.post('/api/login', async (req, res) => {
 
     const token = jwt.sign({ id: user.id, role: 'user' }, JWT_SECRET, { expiresIn: '1h' });
 
-    // renvoyer aussi les infos utiles de l'utilisateur
     res.json({
       token,
       role: 'user',
@@ -133,30 +187,211 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// === ROUTES CONTACT ===
 
+// POST - Enregistrer un nouveau message de contact
+app.post('/api/contact', validateContact, async (req, res) => {
+  let conn;
+  try {
+    const { nom, email, objet, message } = req.body;
+    
+    const ip = req.ip || req.connection.remoteAddress;
+    const userAgent = req.get('User-Agent') || 'Inconnu';
 
-const uploadProduit = multer({
-  storage: multer.diskStorage({
-    destination: './uploads/',
-    filename: (req, file, cb) => {
-      cb(null, Date.now() + '-' + file.originalname);
+    conn = await pool.getConnection();
+    
+    const [result] = await conn.execute(
+      `INSERT INTO contacts (nom, email, objet, message, ip, user_agent) 
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [nom, email, objet, message, ip, userAgent]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Message envoyé avec succès. Nous vous répondrons dans les plus brefs délais.',
+      data: {
+        id: result.insertId,
+        nom,
+        email,
+        objet,
+        date_envoi: new Date()
+      }
+    });
+
+  } catch (error) {
+    console.error('Erreur enregistrement contact:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de l\'envoi du message. Veuillez réessayer.'
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// GET - Récupérer tous les contacts (pour l'admin)
+app.get('/api/admin/contacts', verifyToken, async (req, res) => {
+  let conn;
+  try {
+    const { page = 1, limit = 10, search = '' } = req.query;
+    
+    conn = await pool.getConnection();
+    
+    let query = `SELECT * FROM contacts`;
+    let countQuery = `SELECT COUNT(*) as total FROM contacts`;
+    const params = [];
+    
+    if (search) {
+      const searchCondition = ` WHERE nom LIKE ? OR email LIKE ? OR objet LIKE ?`;
+      query += searchCondition;
+      countQuery += searchCondition;
+      const searchParam = `%${search}%`;
+      params.push(searchParam, searchParam, searchParam);
     }
-  })
-}).fields([
-  { name: 'image_principale', maxCount: 1 },
-  { name: 'image_1', maxCount: 1 },
-  { name: 'image_2', maxCount: 1 }
-]);
+    
+    query += ` ORDER BY date_envoi DESC LIMIT ? OFFSET ?`;
+    
+    const limitNum = parseInt(limit);
+    const offset = (parseInt(page) - 1) * limitNum;
+    
+    const [countRows] = await conn.execute(countQuery, params);
+    const total = countRows[0].total;
+    
+    const [contacts] = await conn.execute(query, [...params, limitNum, offset]);
+    
+    res.json({
+      success: true,
+      data: contacts,
+      pagination: {
+        page: parseInt(page),
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum)
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erreur récupération contacts:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la récupération des contacts'
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
 
+// GET - Récupérer un contact spécifique
+app.get('/api/admin/contacts/:id', verifyToken, async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+    
+    conn = await pool.getConnection();
+    const [contacts] = await conn.execute('SELECT * FROM contacts WHERE id = ?', [id]);
+    
+    if (contacts.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Contact non trouvé'
+      });
+    }
 
+    res.json({
+      success: true,
+      data: contacts[0]
+    });
+    
+  } catch (error) {
+    console.error('Erreur récupération contact:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la récupération du contact'
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
 
-//  Ajouter un produit avec variantes
+// PUT - Marquer un message comme lu
+app.put('/api/admin/contacts/:id/read', verifyToken, async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+    
+    conn = await pool.getConnection();
+    
+    const [result] = await conn.execute(
+      'UPDATE contacts SET lu = TRUE, date_lecture = NOW() WHERE id = ?',
+      [id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Contact non trouvé'
+      });
+    }
+
+    const [contacts] = await conn.execute('SELECT * FROM contacts WHERE id = ?', [id]);
+
+    res.json({
+      success: true,
+      message: 'Message marqué comme lu',
+      data: contacts[0]
+    });
+    
+  } catch (error) {
+    console.error('Erreur mise à jour contact:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la mise à jour du contact'
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// GET - Statistiques des contacts
+app.get('/api/admin/contacts-stats', verifyToken, async (req, res) => {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    
+    const [totalResult] = await conn.execute('SELECT COUNT(*) as total FROM contacts');
+    const [nonLusResult] = await conn.execute('SELECT COUNT(*) as non_lus FROM contacts WHERE lu = FALSE');
+    const [todayResult] = await conn.execute('SELECT COUNT(*) as aujourdhui FROM contacts WHERE DATE(date_envoi) = CURDATE()');
+    const [weekResult] = await conn.execute('SELECT COUNT(*) as cette_semaine FROM contacts WHERE YEARWEEK(date_envoi) = YEARWEEK(CURDATE())');
+    
+    res.json({
+      success: true,
+      data: {
+        total: totalResult[0].total,
+        non_lus: nonLusResult[0].non_lus,
+        aujourdhui: todayResult[0].aujourdhui,
+        cette_semaine: weekResult[0].cette_semaine
+      }
+    });
+    
+  } catch (error) {
+    console.error('Erreur statistiques contacts:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la récupération des statistiques'
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// === ROUTES PRODUITS ===
+
+// Ajouter un produit avec variantes
 app.post('/api/adm/add/produits', upload.any(), async (req, res) => {
   try {
     const { nom, categorie, description, variantes } = req.body;
     const parsedVariantes = JSON.parse(variantes);
 
-    //  Insert produit
     const [prodResult] = await pool.execute(
       'INSERT INTO produits (nom, categorie, description) VALUES (?, ?, ?)',
       [nom, categorie, description]
@@ -164,20 +399,16 @@ app.post('/api/adm/add/produits', upload.any(), async (req, res) => {
 
     const prodId = prodResult.insertId;
 
-    //  Gérer les images pour chaque variante
     parsedVariantes.forEach((v, i) => {
       v.images = {};
       ['principale','image_1','image_2'].forEach(key => {
         const file = req.files.find(f => f.fieldname === `images_${i}_${key}`);
-        v.images[key] = file ? file.filename : null; // si pas d'image -> null
+        v.images[key] = file ? file.filename : null;
       });
-
-      // Assurer que prix/prix_promo ne soient pas undefined
       
       v.prix_promo = v.prix_promo ? v.prix_promo : null;
     });
 
-    // Insert variantes
     for (const v of parsedVariantes) {
       const { options, quantite, prix, prix_promo, images } = v;
       await pool.execute(
@@ -193,12 +424,11 @@ app.post('/api/adm/add/produits', upload.any(), async (req, res) => {
   }
 });
 
-//affichages des produit a l'admin
+// Affichage des produits pour l'admin
 app.get("/api/adm/rec/produits", async (req, res) => {
   try {
     const [produits] = await pool.execute("SELECT * FROM produits");
 
-    // Récupérer variantes pour chaque produit
     const produitsAvecVariantes = await Promise.all(
       produits.map(async (p) => {
         const [variantes] = await pool.execute(
@@ -226,12 +456,11 @@ app.get("/api/adm/rec/produits", async (req, res) => {
   }
 });
 
-//supprimer un produit
+// Supprimer un produit
 app.delete('/api/adm/supprimer-produit/:id', async (req, res) => {
   const { id } = req.params;
   try {
     await pool.execute("DELETE FROM produits WHERE id = ?", [id]);
-    // await pool.execute("DELETE FROM variances WHERE produit_id = ?", [id]);
     res.status(200).json({ message: "Produit supprimé avec succès" });
   } catch (error) {
     console.error("Erreur lors de la suppression :", error);
@@ -248,13 +477,11 @@ app.put('/api/adm/update-produit/:id', upload.any(), async (req, res) => {
 
     await conn.beginTransaction();
 
-    // 1) Update infos générales
     await conn.execute(
       `UPDATE produits SET nom = ?, categorie = ?, description = ? WHERE id = ?`,
       [nom ?? null, categorie ?? null, description ?? null, id]
     );
 
-    // 2) Reconstruire variantes
     let variantes = [];
     if (req.body.variantes) {
       variantes = typeof req.body.variantes === 'string' ? JSON.parse(req.body.variantes) : req.body.variantes;
@@ -272,45 +499,36 @@ app.put('/api/adm/update-produit/:id', upload.any(), async (req, res) => {
       variantes = Object.keys(temp).sort((a, b) => Number(a) - Number(b)).map(i => temp[i]);
     }
 
-    // Helper pour récupérer fichier uploadé
     const getUploadedFilename = (i, key) => {
       const candidates = [`variantes[${i}][images][${key}]`, `images_${i}_${key}`, `variantes_${i}_${key}`];
       const f = (req.files || []).find(file => candidates.includes(file.fieldname));
       return f ? f.filename : null;
     };
 
-    // 3) Fusionner images existantes et uploads
     variantes = variantes.map((v, idx) => {
       const result = { ...v };
 
-      // Parser options si string
       if (typeof result.options === 'string') {
         try { result.options = JSON.parse(result.options); } catch(e){}
       }
 
-      // Types numériques
       result.quantite = result.quantite !== undefined && result.quantite !== '' ? Number(result.quantite) : null;
       result.prix = result.prix !== undefined && result.prix !== '' ? Number(result.prix) : null;
       result.prix_promo = result.prix_promo !== undefined && result.prix_promo !== '' ? Number(result.prix_promo) : null;
 
-      // Images : fusion existant + upload
       result.images = result.images || {};
       ['principale', 'image_1', 'image_2'].forEach((key) => {
-        // si nouveau fichier uploadé -> remplacer
         const uploadFile = getUploadedFilename(idx, key);
         if (uploadFile) result.images[key] = uploadFile;
         else if (result.images[key] === undefined || result.images[key] === null) result.images[key] = null;
-        // sinon garder l'ancien nom (string)
       });
 
       return result;
     });
 
-    // 4) Update/Insert variantes
     for (const v of variantes) {
       const optionsJSON = v.options ? JSON.stringify(v.options) : JSON.stringify({});
       if (v.id) {
-        // update existant
         await conn.execute(
           `UPDATE variantes
            SET options = ?, quantite = ?, prix = ?, prix_promo = ?, image_principale = ?, image_1 = ?, image_2 = ?
@@ -328,7 +546,6 @@ app.put('/api/adm/update-produit/:id', upload.any(), async (req, res) => {
           ]
         );
       } else {
-        // nouvelle variante
         await conn.execute(
           `INSERT INTO variantes (produit_id, options, quantite, prix, prix_promo, image_principale, image_1, image_2)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -358,7 +575,7 @@ app.put('/api/adm/update-produit/:id', upload.any(), async (req, res) => {
   }
 });
 
-//affichages des produit a l'accueil
+// Affichage des produits pour l'accueil
 app.get("/api/rec/produits", async (req, res) => {
   try {
     const [rows] = await pool.execute("SELECT * FROM produits");
@@ -369,34 +586,32 @@ app.get("/api/rec/produits", async (req, res) => {
   }
 });
 
-//Enregitrement des commanders
+// === ROUTES COMMANDES ===
+
+// Enregistrement des commandes
 app.post("/api/commande/create", async (req, res) => {
   try {
-     console.log("Données reçues du front :", req.body);
+    console.log("Données reçues du front :", req.body);
 
     const { userId, adresseLivraison, paiement, cardData, items, total } = req.body;
 
-    // Validation minimale
     if (!userId || !adresseLivraison || !paiement || !items || !total) {
       return res.status(400).json({ message: "Données manquantes" });
     }
 
     let cardInfo = null;
 
-    // Si paiement par carte
     if (paiement === "carte") {
       if (!cardData || !cardData.numero || !cardData.date || !cardData.cvc) {
         return res.status(400).json({ message: "Informations de carte manquantes" });
       }
 
-      // Ne jamais stocker le CVC ou le code complet
       cardInfo = {
-        numero: cardData.numero.replace(/\d{12}(\d{4})$/, "**** **** **** $1"), // masque tout sauf les 4 derniers
+        numero: cardData.numero.replace(/\d{12}(\d{4})$/, "**** **** **** $1"),
         dateExp: cardData.date
       };
     }
 
-    // Insérer la commande dans la base
     const [result] = await pool.query(
       `INSERT INTO commandes (userId, adresseLivraison, paiement, cardData, items, total)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -421,25 +636,7 @@ app.post("/api/commande/create", async (req, res) => {
   }
 });
 
-
-function verifyToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  if (!authHeader) return res.status(401).json({ message: 'Token manquant' });
-
-  const token = authHeader.split(' ')[1]; // Bearer <token>
-  if (!token) return res.status(401).json({ message: 'Token manquant' });
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (err) {
-    return res.status(403).json({ message: 'Token invalide' });
-  }
-}
-
-
-//Afficher les commandes 
+// Afficher les commandes d'un utilisateur
 app.get("/api/commandes/:userId", verifyToken, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -460,7 +657,6 @@ app.get("/api/commandes/:userId", verifyToken, async (req, res) => {
   }
 });
 
-
 // Route admin pour récupérer toutes les commandes
 app.get("/api/admin/get-commandes", async (req, res) => {
   try {
@@ -476,7 +672,6 @@ app.get("/api/admin/get-commandes", async (req, res) => {
       let adresse = {};
       let produits = [];
 
-      // Parser l'adresse
       try {
         if (typeof c.adresseLivraison === "string") {
           adresse = JSON.parse(c.adresseLivraison);
@@ -487,12 +682,11 @@ app.get("/api/admin/get-commandes", async (req, res) => {
         console.error("Erreur JSON adresseLivraison", c.id, c.adresseLivraison);
       }
 
-      // Parser les items avec fix quotes et clés
       try {
         if (typeof c.items === "string") {
           let rawItems = c.items
-            .replace(/'/g, '"')                   // Remplace ' par "
-            .replace(/([a-zA-Z0-9_]+):/g, '"$1":'); // Ajoute " autour des clés non-quotées
+            .replace(/'/g, '"')
+            .replace(/([a-zA-Z0-9_]+):/g, '"$1":');
           produits = JSON.parse(rawItems || "[]");
         } else {
           produits = c.items || [];
@@ -522,35 +716,26 @@ app.get("/api/admin/get-commandes", async (req, res) => {
   }
 });
 
-
 // Route pour mettre à jour l'état d'une commande
 app.put("/api/commandes/:id", async (req, res) => {
   const { id } = req.params;
   const { etat } = req.body;
 
-  // Vérifier que l'état est valide
   const etatsValides = ["en_attente", "validée", "en_livraison", "livrée", "annulée"];
   if (!etatsValides.includes(etat)) {
     return res.status(400).json({ success: false, message: "État invalide." });
   }
 
   try {
-    const connection = await mysql.createConnection(dbConfig);
-
-    // Vérifier si la commande existe
-    const [rows] = await connection.execute("SELECT * FROM commandes WHERE id = ?", [id]);
+    const [rows] = await pool.execute("SELECT * FROM commandes WHERE id = ?", [id]);
     if (rows.length === 0) {
-      await connection.end();
       return res.status(404).json({ success: false, message: "Commande non trouvée." });
     }
 
-    // Mettre à jour l'état
-    await connection.execute("UPDATE commandes SET etat = ? WHERE id = ?", [etat, id]);
+    await pool.execute("UPDATE commandes SET etat = ? WHERE id = ?", [etat, id]);
 
-    // Récupérer la commande mise à jour
-    const [updatedRows] = await connection.execute("SELECT * FROM commandes WHERE id = ?", [id]);
+    const [updatedRows] = await pool.execute("SELECT * FROM commandes WHERE id = ?", [id]);
 
-    await connection.end();
     res.json({ success: true, commande: updatedRows[0] });
 
   } catch (err) {
@@ -559,14 +744,39 @@ app.put("/api/commandes/:id", async (req, res) => {
   }
 });
 
+// === ROUTE DE SANTÉ ===
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'API Olatech est opérationnelle',
+    base_url: BASE_URL,
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
 
+// === GESTION DES ERREURS 404 ===
+// CORRECTION : Utiliser une route spécifique au lieu de '*'
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Route non trouvée: ' + req.originalUrl
+  });
+});
 
-
-
-
-
+// === MIDDLEWARE DE GESTION DES ERREURS GLOBAL ===
+app.use((err, req, res, next) => {
+  console.error('Erreur globale:', err);
+  res.status(500).json({
+    success: false,
+    message: 'Erreur interne du serveur',
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
+});
 
 // Lancer le serveur
 app.listen(PORT, () => {
-  console.log(`Serveur démarré sur http://localhost:${PORT}`);
+  console.log(` Serveur démarré sur ${BASE_URL}`);
+  console.log(` Environnement: ${process.env.NODE_ENV || 'development'}`);
+  console.log(` Port: ${PORT}`);
 });
