@@ -589,39 +589,76 @@ app.get("/api/rec/produits", async (req, res) => {
 // === ROUTES COMMANDES ===
 
 // Enregistrement des commandes
-app.post("/api/commande/create", async (req, res) => {
+app.post("/api/commande/create", upload.single('proofImage'), async (req, res) => {
   try {
     console.log("Données reçues du front :", req.body);
 
-    const { userId, adresseLivraison, paiement, cardData, items, total } = req.body;
+    // Récupérer les données du formulaire
+    const commandeData = JSON.parse(req.body.commande);
+    const { userId, adresseLivraison, paiement, mobileMoneyData, items, total } = commandeData;
 
     if (!userId || !adresseLivraison || !paiement || !items || !total) {
       return res.status(400).json({ message: "Données manquantes" });
     }
 
-    let cardInfo = null;
+    let paymentInfo = null;
+    let proofImagePath = null;
 
-    if (paiement === "carte") {
+    // Gestion du paiement mobile money
+    if (paiement.startsWith("mobile_money_")) {
+      if (!mobileMoneyData || !mobileMoneyData.operator || !mobileMoneyData.clientNumber) {
+        return res.status(400).json({ message: "Informations de paiement mobile manquantes" });
+      }
+
+      // Gérer l'upload de l'image de preuve
+      if (req.file) {
+        proofImagePath = req.file.filename;
+      } else {
+        return res.status(400).json({ message: "Preuve de transfert manquante" });
+      }
+
+      paymentInfo = {
+        type: "mobile_money",
+        operator: mobileMoneyData.operator,
+        operatorName: mobileMoneyData.operatorName,
+        sellerNumber: mobileMoneyData.sellerNumber,
+        clientNumber: mobileMoneyData.clientNumber,
+        clientName: mobileMoneyData.clientName,
+        timestamp: mobileMoneyData.timestamp,
+        proofImage: proofImagePath
+      };
+    }
+    // Gestion du paiement à la livraison
+    else if (paiement === "livraison") {
+      paymentInfo = {
+        type: "livraison"
+      };
+    }
+    // Gestion du paiement par carte (conservé pour compatibilité)
+    else if (paiement === "carte") {
       if (!cardData || !cardData.numero || !cardData.date || !cardData.cvc) {
         return res.status(400).json({ message: "Informations de carte manquantes" });
       }
 
-      cardInfo = {
+      paymentInfo = {
+        type: "carte",
         numero: cardData.numero.replace(/\d{12}(\d{4})$/, "**** **** **** $1"),
         dateExp: cardData.date
       };
     }
 
+    // Insérer la commande dans la base de données
     const [result] = await pool.query(
-      `INSERT INTO commandes (userId, adresseLivraison, paiement, cardData, items, total)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO commandes (userId, adresseLivraison, paiement, paymentData, items, total, statut)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         userId,
         JSON.stringify(adresseLivraison),
         paiement,
-        cardInfo ? JSON.stringify(cardInfo) : null,
+        paymentInfo ? JSON.stringify(paymentInfo) : null,
         JSON.stringify(items),
-        total
+        total,
+        'en_attente' // Statut par défaut
       ]
     );
 
@@ -631,8 +668,8 @@ app.post("/api/commande/create", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Erreur serveur" });
+    console.error("Erreur lors de la création de la commande :", err);
+    res.status(500).json({ message: "Erreur serveur lors de la création de la commande" });
   }
 });
 
@@ -661,7 +698,7 @@ app.get("/api/commandes/:userId", verifyToken, async (req, res) => {
 app.get("/api/admin/get-commandes", async (req, res) => {
   try {
     const [rows] = await pool.execute(`
-      SELECT c.id, c.etat, c.total, c.adresseLivraison, c.paiement, c.items, c.createdAt,
+      SELECT c.id, c.etat, c.total, c.adresseLivraison, c.paiement, c.paymentData, c.items, c.createdAt,
              u.name AS client_nom, u.email AS client_email
       FROM commandes c
       JOIN users u ON c.userId = u.id
@@ -671,6 +708,7 @@ app.get("/api/admin/get-commandes", async (req, res) => {
     const commandes = rows.map(c => {
       let adresse = {};
       let produits = [];
+      let paymentData = {};
 
       try {
         if (typeof c.adresseLivraison === "string") {
@@ -696,12 +734,24 @@ app.get("/api/admin/get-commandes", async (req, res) => {
         produits = [];
       }
 
+      try {
+        if (c.paymentData && typeof c.paymentData === "string") {
+          paymentData = JSON.parse(c.paymentData);
+        } else {
+          paymentData = c.paymentData || {};
+        }
+      } catch (e) {
+        console.error("Erreur JSON paymentData", c.id, c.paymentData);
+        paymentData = {};
+      }
+
       return {
         id: c.id,
         etat: c.etat,
         total: c.total,
         adresseLivraison: adresse,
         paiement: c.paiement,
+        paymentData: paymentData,
         createdAt: c.createdAt,
         client: { nom: c.client_nom, email: c.client_email },
         items: produits
