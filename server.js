@@ -848,6 +848,9 @@
 
 
 // server.js
+require('dotenv').config();
+
+
 const express = require('express');
 const mysql = require('mysql2/promise');
 const multer = require('multer');
@@ -858,7 +861,6 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
 const bodyParser = require('body-parser');
-require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -876,12 +878,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static('uploads'));
 
 // === CORS DYNAMIQUE ===
-const allowedOrigins = [
-  'https://gse-front.vercel.app',
-  'http://localhost:3000',
-  'http://localhost:3001',
-  'http://localhost:3002'
-];
+const allowedOrigins = ['https://gse-front.vercel.app'];
 
 app.use(cors({
   origin: function(origin, callback) {
