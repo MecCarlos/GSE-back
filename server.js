@@ -9,6 +9,8 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
 const bodyParser = require('body-parser');
+require('dotenv').config();
+
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -58,18 +60,29 @@ const upload = multer({
 });
 
 // Configuration de la connexion MySQL (options valides)
+// const dbConfig = {
+//   host: 'localhost',
+//   user: 'root',
+//   password: '',
+//   database: 'g_empire',
+//   connectionLimit: 10,
+//   acquireTimeout: 60000,
+//   timeout: 60000,
+//   connectTimeout: 60000,
+//   reconnect: true
+// };
+
 const dbConfig = {
-  host: 'localhost',
-  user: 'root',
-  password: '',
-  database: 'g_empire',
+  host: process.env.DB_HOST,      // ex: gse-db-gse-2025.d.aivencloud.com
+  port: process.env.DB_PORT,      // ex: 23261
+  user: process.env.DB_USER,      // ex: avnadmin
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,  // ex: defaultdb ou g_empire
+  waitForConnections: true,
   connectionLimit: 10,
-  // Options valides pour mysql2
-  acquireTimeout: 60000,
-  timeout: 60000,
-  connectTimeout: 60000,
-  reconnect: true
+  queueLimit: 0
 };
+
 
 // Création du pool global unique
 const pool = mysql.createPool(dbConfig);
