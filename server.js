@@ -72,21 +72,51 @@ const upload = multer({
 //   reconnect: true
 // };
 
+// const dbConfig = {
+//   host: process.env.DB_HOST,      // ex: gse-db-gse-2025.d.aivencloud.com
+//   port: process.env.DB_PORT,      // ex: 23261
+//   user: process.env.DB_USER,      // ex: avnadmin
+//   password: process.env.DB_PASSWORD,
+//   database: process.env.DB_NAME,  // ex: defaultdb ou g_empire
+//   waitForConnections: true,
+//   connectionLimit: 10,
+//   queueLimit: 0
+// };
+
+
 const dbConfig = {
-  host: process.env.DB_HOST,      // ex: gse-db-gse-2025.d.aivencloud.com
-  port: process.env.DB_PORT,      // ex: 23261
-  user: process.env.DB_USER,      // ex: avnadmin
+  host: process.env.DB_HOST,
+  port: parseInt(process.env.DB_PORT, 10),
+  user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,  // ex: defaultdb ou g_empire
+  database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
 };
 
+const pool = mysql.createPool(dbConfig);
+
+// Test rapide au démarrage
+(async () => {
+  try {
+    const conn = await pool.getConnection();
+    console.log('✅ Connexion MySQL réussie !');
+    conn.release();
+  } catch (err) {
+    console.error('❌ Erreur de connexion MySQL :', err);
+  }
+})();
+
+
+
+
+
+
 
 // Création du pool global unique
-const pool = mysql.createPool(dbConfig);
-console.log('Connexion à la base de données MySQL établie');
+// const pool = mysql.createPool(dbConfig);
+// console.log('Connexion à la base de données MySQL établie');
 
 // Middleware de vérification du token
 function verifyToken(req, res, next) {
