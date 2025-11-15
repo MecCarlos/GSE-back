@@ -1,4 +1,5 @@
 // server.js
+require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
 const multer = require('multer');
@@ -9,7 +10,6 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
 const bodyParser = require('body-parser');
-require('dotenv').config();
 
 
 const app = express();
@@ -619,15 +619,34 @@ app.put('/api/adm/update-produit/:id', upload.any(), async (req, res) => {
 });
 
 // Affichage des produits pour l'accueil
-app.get("/api/rec/produits", async (req, res) => {
+// app.get("/api/rec/produits", async (req, res) => {
+//   try {
+//     const [rows] = await pool.execute("SELECT * FROM produits");
+//     res.status(200).json(rows); 
+//   } catch (error) {
+//     console.error("Erreur lors de la récupération des produits :", error);
+//     res.status(500).json({ message: "Erreur serveur" });
+//   }
+// });
+
+// server.js (ajoute cette route)
+app.get('/api/rec/produits', async (req, res) => {
   try {
-    const [rows] = await pool.execute("SELECT * FROM produits");
-    res.status(200).json(rows); 
-  } catch (error) {
-    console.error("Erreur lors de la récupération des produits :", error);
-    res.status(500).json({ message: "Erreur serveur" });
+    // Test connexion à la base
+    const [rows] = await pool.query('SELECT * FROM produits'); // Assure-toi que la table existe
+    if (!Array.isArray(rows)) {
+      console.error('Erreur : les résultats de la requête ne sont pas un tableau', rows);
+      return res.status(500).json({ message: 'Erreur interne serveur : résultat invalide' });
+    }
+
+    res.json(rows);
+
+  } catch (err) {
+    console.error('Erreur récupération produits :', err);
+    res.status(500).json({ message: 'Erreur serveur lors de la récupération des produits', error: err.message });
   }
 });
+
 
 // === ROUTES COMMANDES ===
 
