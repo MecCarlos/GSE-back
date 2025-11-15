@@ -876,19 +876,42 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static('uploads'));
 
 // === CORS DYNAMIQUE ===
+// const allowedOrigins = ['https://gse-front.vercel.app'];
+
+// app.use(cors({
+//   origin: function(origin, callback) {
+//     if (!origin) return callback(null, true);
+//     if (allowedOrigins.indexOf(origin) === -1) return callback(new Error('Origine CORS non autorisée'), false);
+//     return callback(null, true);
+//   },
+//   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+//   allowedHeaders: ['Content-Type','Authorization'],
+//   credentials: true
+// }));
+// app.options('*', cors());
+
 const allowedOrigins = ['https://gse-front.vercel.app'];
 
 app.use(cors({
-  origin: function(origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) === -1) return callback(new Error('Origine CORS non autorisée'), false);
-    return callback(null, true);
+  origin: function (origin, callback) {
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn("CORS bloqué pour l'origine :", origin);
+    return callback(null, false);  
   },
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
-  credentials: true
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
 }));
+
 app.options('*', cors());
+
 
 app.use(session({
   secret: 'session_secret',
