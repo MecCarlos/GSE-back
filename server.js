@@ -1174,6 +1174,18 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use("/uploads", express.static("uploads"));
 
+// Middleware de validation pour le contact
+const validateContact = (req, res, next) => {
+  const { nom, email, objet, message } = req.body;
+
+  if (!nom || !email || !objet || !message) {
+    return res.status(400).json({
+      success: false,
+      message: "Tous les champs sont obligatoires",
+    });
+  }
+}
+
 // CORS pour production
 app.use(
   cors({
@@ -1883,6 +1895,289 @@ app.put("/api/commandes/:id", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: "Erreur serveur." });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+// GET - Récupérer seulement le compteur des messages non lus
+app.get("/api/admin/contacts/unread-count", verifyToken, async (req, res) => {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    const [rows] = await conn.execute('SELECT COUNT(*) as count FROM contacts WHERE lu = FALSE');
+    
+    res.json({
+      success: true,
+      count: rows[0].count
+    });
+  } catch (error) {
+    console.error("Erreur récupération compteur messages non lus:", error);
+    res.status(500).json({
+      success: false,
+      message: "Erreur lors de la récupération du compteur",
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// POST - Enregistrer un nouveau message de contact
+app.post("/api/contact", validateContact, async (req, res) => {
+  let conn;
+  try {
+    const { nom, email, objet, message } = req.body;
+
+    const ip = req.ip || req.connection.remoteAddress;
+    const userAgent = req.get("User-Agent") || "Inconnu";
+
+    conn = await pool.getConnection();
+
+    const [result] = await conn.execute(
+      `INSERT INTO contacts (nom, email, objet, message, ip, user_agent) 
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [nom, email, objet, message, ip, userAgent]
+    );
+
+    res.status(201).json({
+      success: true,
+      message:
+        "Message envoyé avec succès. Nous vous répondrons dans les plus brefs délais.",
+      data: {
+        id: result.insertId,
+        nom,
+        email,
+        objet,
+        date_envoi: new Date(),
+      },
+    });
+  } catch (error) {
+    console.error("Erreur enregistrement contact:", error);
+    res.status(500).json({
+      success: false,
+      message: "Erreur lors de l'envoi du message. Veuillez réessayer.",
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// GET - Récupérer tous les contacts (pour l'admin) - VERSION AVEC CONCATENATION SECURISEE
+app.get("/api/admin/contacts", verifyToken, async (req, res) => {
+  let conn;
+  try {
+    const { page = 1, limit = 10, search = "" } = req.query;
+    
+    console.log(" Requête contacts reçue:", { page, limit, search });
+
+    conn = await pool.getConnection();
+
+    // Validation et conversion
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(Math.max(1, parseInt(limit)), 100); // Max 100 par page
+    const offset = (pageNum - 1) * limitNum;
+
+    let baseQuery = `SELECT * FROM contacts`;
+    let countQuery = `SELECT COUNT(*) as total FROM contacts`;
+    const params = [];
+
+    if (search && search.trim() !== "") {
+      const searchCondition = ` WHERE nom LIKE ? OR email LIKE ? OR objet LIKE ?`;
+      baseQuery += searchCondition;
+      countQuery += searchCondition;
+      const searchParam = `%${search}%`;
+      params.push(searchParam, searchParam, searchParam);
+    }
+
+    // Query finale avec LIMIT concaténé (sécurisé car on a validé les nombres)
+    const finalQuery = `${baseQuery} ORDER BY date_envoi DESC LIMIT ${limitNum} OFFSET ${offset}`;
+
+    console.log(" Exécution queries:", { countQuery, finalQuery });
+
+    // Compter le total
+    const [countRows] = await conn.execute(countQuery, params);
+    const total = countRows[0].total;
+
+    // Récupérer les données
+    const [contacts] = await conn.execute(finalQuery, params);
+
+    res.json({
+      success: true,
+      data: contacts,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum),
+      },
+    });
+
+  } catch (error) {
+    console.error(" Erreur récupération contacts:", error);
+    res.status(500).json({
+      success: false,
+      message: "Erreur lors de la récupération des contacts",
+      error: error.message
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// GET - Récupérer un contact spécifique
+app.get("/api/admin/contacts/:id", verifyToken, async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+
+    conn = await pool.getConnection();
+    const [contacts] = await conn.execute(
+      "SELECT * FROM contacts WHERE id = ?",
+      [id]
+    );
+
+    if (contacts.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Contact non trouvé",
+      });
+    }
+
+    res.json({
+      success: true,
+      data: contacts[0],
+    });
+  } catch (error) {
+    console.error("Erreur récupération contact:", error);
+    res.status(500).json({
+      success: false,
+      message: "Erreur lors de la récupération du contact",
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// PUT - Marquer un message comme lu
+app.put("/api/admin/contacts/:id/read", verifyToken, async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+
+    conn = await pool.getConnection();
+
+    const [result] = await conn.execute(
+      "UPDATE contacts SET lu = TRUE, date_lecture = NOW() WHERE id = ?",
+      [id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Contact non trouvé",
+      });
+    }
+
+    const [contacts] = await conn.execute(
+      "SELECT * FROM contacts WHERE id = ?",
+      [id]
+    );
+
+    res.json({
+      success: true,
+      message: "Message marqué comme lu",
+      data: contacts[0],
+    });
+  } catch (error) {
+    console.error("Erreur mise à jour contact:", error);
+    res.status(500).json({
+      success: false,
+      message: "Erreur lors de la mise à jour du contact",
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// GET - Statistiques des contacts
+app.get("/api/admin/contacts-stats", verifyToken, async (req, res) => {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+
+    const [totalResult] = await conn.execute(
+      "SELECT COUNT(*) as total FROM contacts"
+    );
+    const [nonLusResult] = await conn.execute(
+      "SELECT COUNT(*) as non_lus FROM contacts WHERE lu = FALSE"
+    );
+    const [todayResult] = await conn.execute(
+      "SELECT COUNT(*) as aujourdhui FROM contacts WHERE DATE(date_envoi) = CURDATE()"
+    );
+    const [weekResult] = await conn.execute(
+      "SELECT COUNT(*) as cette_semaine FROM contacts WHERE YEARWEEK(date_envoi) = YEARWEEK(CURDATE())"
+    );
+
+    res.json({
+      success: true,
+      data: {
+        total: totalResult[0].total,
+        non_lus: nonLusResult[0].non_lus,
+        aujourdhui: todayResult[0].aujourdhui,
+        cette_semaine: weekResult[0].cette_semaine,
+      },
+    });
+  } catch (error) {
+    console.error("Erreur statistiques contacts:", error);
+    res.status(500).json({
+      success: false,
+      message: "Erreur lors de la récupération des statistiques",
+    });
+  } finally {
+    if (conn) conn.release();
+  }
+});
+
+// Delete
+app.delete("/api/admin/contacts/:id", verifyToken, async (req, res) => {
+  let conn;
+  try {
+    const { id } = req.params;
+
+    conn = await pool.getConnection();
+
+    const [result] = await conn.execute(
+      "DELETE FROM contacts WHERE id = ?",
+      [id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Contact non trouvé",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Message supprimé avec succès",
+    });
+  } catch (error) {
+    console.error("Erreur suppression contact:", error);
+    res.status(500).json({
+      success: false,
+      message: "Erreur lors de la suppression du message",
+    });
+  } finally {
+    if (conn) conn.release();
   }
 });
 
